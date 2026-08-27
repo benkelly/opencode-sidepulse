@@ -1,12 +1,41 @@
 # opencode-sidepulse
 
+[![npm](https://img.shields.io/npm/v/opencode-sidepulse)](https://www.npmjs.com/package/opencode-sidepulse)
+[![license](https://img.shields.io/npm/l/opencode-sidepulse)](LICENSE)
+
 Show opencode agent status on a [SidePulse](https://sidepulse.io) Pro or Dot LED device.
 
 The device sits in a MacBook SD card slot or a USB-C port. The LEDs tell you whether the
 agent works, waits for your approval, failed, or finished. You do not need to watch the
 terminal.
 
+npm package: [`opencode-sidepulse`](https://www.npmjs.com/package/opencode-sidepulse). No
+dependencies and no build step.
+
 ## Install
+
+### Option 1: let opencode do it
+
+Paste this prompt into an opencode session:
+
+```text
+Install the opencode-sidepulse plugin for me.
+
+1. Find my opencode config. Prefer the global file at
+   ~/.config/opencode/opencode.json or ~/.config/opencode/opencode.jsonc. Create the
+   global file if neither exists, with only {"$schema": "https://opencode.ai/config.json"}.
+2. Add the string "opencode-sidepulse" to the top-level "plugin" array. The value is an
+   array of strings. Create the array if it is absent. Keep every existing entry.
+3. Make sure that exactly one sidepulse entry loads. Check
+   ~/.config/opencode/plugins/, ~/.config/opencode/plugin/, .opencode/plugins/ and
+   .opencode/plugin/ for any file that writes to LEDS.LED. Delete any copy you find,
+   because two instances mean two writers fighting over the device.
+4. Show me the diff, then tell me to quit and restart opencode.
+
+Do not change any other config field.
+```
+
+### Option 2: edit the config yourself
 
 Add the plugin to `opencode.json` or `~/.config/opencode/opencode.jsonc`:
 
@@ -17,7 +46,13 @@ Add the plugin to `opencode.json` or `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
+opencode installs the package from npm at startup, so you do not run `npm install`.
+
 Quit opencode and start it again. opencode loads config once at startup.
+
+Keep exactly one sidepulse entry. opencode auto-loads every `.ts` and `.js` file in
+`.opencode/plugins/` and `~/.config/opencode/plugins/`, so a copy left there loads a
+second instance and the two fight over the device.
 
 ## What the LEDs mean
 
@@ -75,10 +110,22 @@ The plugin needs no dependencies and no build step.
 
 ## Test it
 
+From a clone of this repository:
+
 ```sh
 bun plugin.mjs          # program limits, state machine, device and socket discovery
 bun plugin.mjs --demo   # walk every LED state on the real device, four seconds each
 ```
+
+Without a clone, check that the published package imports:
+
+```sh
+bunx --package opencode-sidepulse bun -e \
+  'import("opencode-sidepulse").then(m => console.log(Object.keys(m).join(",")))'
+# SidePulse,default
+```
+
+That confirms the package only. Use a clone for the self-check and the demo.
 
 The LED language has no error channel. A program that fails to parse blinks all LEDs red
 six times. Watch the device during `--demo` to confirm each state.
