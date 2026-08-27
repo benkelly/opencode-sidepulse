@@ -98,6 +98,9 @@ function send(path, event, sessionID, cwd, tool) {
       hook_event_name: event,
       session_id: sessionID,
       cwd,
+      // Upstream origin_label_from_payload() reads this key, so the app labels the agent
+      // instead of leaving origin empty. Providers it does not know get no origin at all.
+      agent_origin: "opencode",
       ...(tool ? { tool_name: tool } : {}),
     },
   })
