@@ -30,9 +30,6 @@
     "README.md",
     "LICENSE"
   ],
-  "os": [
-    "darwin"
-  ],
   "scripts": {
     "test": "bun plugin.mjs"
   }
