@@ -1,0 +1,39 @@
+{
+  "name": "opencode-sidepulse",
+  "version": "0.1.0",
+  "description": "Show opencode agent status on a SidePulse Pro or SidePulse Dot LED device.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "sidepulse",
+    "led",
+    "agent-status",
+    "macbook"
+  ],
+  "license": "MIT",
+  "author": "ben",
+  "homepage": "https://github.com/benkelly/opencode-sidepulse#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benkelly/opencode-sidepulse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/benkelly/opencode-sidepulse/issues"
+  },
+  "type": "module",
+  "main": "./plugin.mjs",
+  "exports": {
+    ".": "./plugin.mjs"
+  },
+  "files": [
+    "plugin.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "test": "bun plugin.mjs"
+  }
+}
