@@ -103,19 +103,24 @@ file write is the whole interface.
 ## Requirements
 
 - macOS.
-- opencode. App mode uses `Bun.connect`, which the opencode runtime provides.
+- opencode.
 - A SidePulse Pro or SidePulse Dot.
 
-The plugin needs no dependencies and no build step.
+The plugin needs no dependencies and no build step. It uses only Node standard library
+modules, so it runs the same under any opencode runtime.
 
 ## Test it
 
-From a clone of this repository:
+From a clone of this repository, under `node` or `bun`:
 
 ```sh
-bun plugin.mjs          # program limits, state machine, device and socket discovery
-bun plugin.mjs --demo   # walk every LED state on the real device, four seconds each
+node plugin.mjs          # program limits, state machine, device and socket discovery
+node plugin.mjs --send   # send one test event to a running app, and report delivery
+node plugin.mjs --demo   # walk every LED state on the real device, four seconds each
 ```
+
+Use `--send` whenever you change the socket transport. App mode falls back to direct mode
+on any failure, so a broken transport is otherwise invisible.
 
 Without a clone, check that the published package imports:
 

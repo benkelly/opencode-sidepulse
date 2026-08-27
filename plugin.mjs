@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
+import { createConnection } from "node:net"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
@@ -81,9 +82,15 @@ function socket() {
 }
 
 // The app reads one JSON object per connection and stops at EOF, so the client must
-// half-close after writing. Upstream caps a message at 1 MiB; ours are tiny.
-// Requires opencode's Bun runtime for Bun.connect. Any failure resolves false so the
-// caller falls back to direct mode instead of throwing into a hook.
+// half-close after writing. end(payload) writes and then sends FIN, which is that EOF.
+// Upstream caps a message at 1 MiB; ours are tiny.
+//
+// Use node:net, not Bun.connect. Bun globals are not reachable from an npm-installed
+// plugin, so Bun.connect threw ReferenceError, the catch below swallowed it, and app mode
+// silently degraded to direct mode. node:net is stdlib and works under any runtime.
+//
+// Any failure resolves false so the caller falls back to direct mode instead of throwing
+// into a hook.
 function send(path, event, sessionID, cwd, tool) {
   const payload = JSON.stringify({
     provider: "opencode",
@@ -95,25 +102,19 @@ function send(path, event, sessionID, cwd, tool) {
     },
   })
   return new Promise((resolve) => {
+    let socket
     // Never let a hung socket stall a turn. Upstream uses a 200 ms timeout; match it.
-    const timer = setTimeout(() => resolve(false), 200)
+    const timer = setTimeout(() => {
+      socket?.destroy()
+      resolve(false)
+    }, 200)
     const finish = (ok) => {
       clearTimeout(timer)
       resolve(ok)
     }
     try {
-      Bun.connect({
-        unix: path,
-        socket: {
-          open(sock) {
-            sock.write(payload)
-            sock.end()
-            finish(true)
-          },
-          data() {}, // Bun requires data or drain. The app never replies.
-          error: () => finish(false),
-        },
-      }).catch(() => finish(false))
+      socket = createConnection({ path }, () => socket.end(payload, () => finish(true)))
+      socket.on("error", () => finish(false))
     } catch {
       finish(false)
     }
@@ -213,9 +214,14 @@ export const SidePulse = async ({ directory } = {}) => {
 
 export default SidePulse
 
-// Self-check. Run it with: bun plugin.mjs   (add --demo to walk the device)
-// opencode imports this file, so import.meta.main keeps the check out of the plugin path.
-if (import.meta.main) {
+// Self-check. Run it with: node plugin.mjs   (also works under bun)
+//   --demo   walk every LED state on the device, four seconds each
+//   --send   send one test event to a live app socket and report the result
+// opencode imports this file, so this block stays out of the plugin path. import.meta.main
+// is a bun-ism, so check argv too, which keeps the check runnable under plain node.
+const selfCheck =
+  import.meta.main || process.argv[1]?.endsWith("plugin.mjs")
+if (selfCheck) {
   for (const [name, program] of Object.entries(PROGRAMS)) {
     const bytes = Buffer.byteLength(program)
     const lines = program.trimEnd().split("\n").length
@@ -232,12 +238,27 @@ if (import.meta.main) {
   console.log(`   app socket ${socket() ?? "absent, using direct mode"}`)
   for (const path of CANDIDATES) console.log(`   probed     ${path}`)
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  // Exercise the real send(), so a broken transport cannot hide behind the direct-mode
+  // fallback. This is the check that would have caught the Bun.connect regression.
+  if (process.argv.includes("--send")) {
+    const path = socket()
+    if (!path) {
+      console.log("   --send: no app socket, nothing to test")
+    } else {
+      const ok = await send(path, "Stop", "selfcheck-session", process.cwd())
+      console.log(`   --send: ${ok ? "delivered to" : "FAILED against"} ${path}`)
+      if (!ok) process.exitCode = 1
+    }
+  }
+
   if (process.argv.includes("--demo")) {
     for (const state of Object.keys(PROGRAMS)) {
       shown = undefined
       const ok = write(state)
       console.log(`   ${state}${ok ? "" : "  <-- write failed"}`)
-      await Bun.sleep(4000)
+      await sleep(4000)
     }
   }
 }
