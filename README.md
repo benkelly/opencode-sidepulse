@@ -60,9 +60,12 @@ second instance and the two fight over the device.
 | --- | --- |
 | Cyan comet | The agent thinks or runs a tool. |
 | Amber breathing | A permission prompt or a multiple-choice question waits for you. |
-| Solid green | The turn finished. |
+| Solid green | The turn finished, or you cancelled it. |
 | Red breathing | The turn failed, or opencode is retrying a failed provider call. |
-| Very dim breathing | You aborted the turn. |
+
+A cancelled turn deliberately looks the same as a finished one. The device is there to
+tell you things you cannot see. You already know that you cancelled it.
+
 
 The green hold stays until the next turn starts. The device holds the last program, so the
 plugin needs no timer to keep the color.

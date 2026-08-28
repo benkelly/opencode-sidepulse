@@ -146,10 +146,14 @@ function signalForEvent(type, props) {
   // trace shows permission.asked, so both are needed across versions.
   if (type === "permission.updated" || type === "permission.asked") return "ask"
   if (type === "permission.replied") return "reply"
-  // A cancelled turn ends with session.idle. Suppress it, or green overwrites the abort.
-  if (type === "session.idle") return aborted ? null : "idle"
+  if (type === "session.idle") return "idle"
   if (type === "session.error")
-    return props.error?.name === "MessageAbortedError" ? "abort" : "error"
+    // A cancel is not a failure, so it must not go red. It gets no state of its own
+    // beyond that: upstream sets IDLE_VISIBLE_SECONDS to 0, so an Idle / Ready status is
+    // stale the instant it is set and can never be displayed. A cancel is also the one
+    // state you already know about, because you just caused it. So it ends like any other
+    // turn.
+    return props.error?.name === "MessageAbortedError" ? "idle" : "error"
   if (type === "session.status") {
     const status = props.status?.type
     if (status === "retry" && !retrying) return "retry"
@@ -174,16 +178,6 @@ let turnActive = false
 // are otherwise invisible, so a stalled turn looks exactly like a working one.
 let retrying = false
 
-// A cancelled turn emits session.error with MessageAbortedError and then session.idle,
-// twice, about a millisecond later. Captured from a real ctrl+g cancel:
-//
-//   session.error  error=MessageAbortedError
-//   session.idle
-//   session.idle
-//
-// Untracked, the dim abort state is repainted green as though the turn had finished.
-// The flag survives until the next turn, so the repeat is covered too.
-let aborted = false
 
 // Each signal carries the LED state for direct mode and the upstream event name for app
 // mode. Both mappings are verified against the upstream collector.
@@ -194,11 +188,6 @@ const SIGNALS = {
   ask: { state: "waiting", event: "PermissionRequest" },
   reply: { state: "busy", event: "UserPromptSubmit" },
   idle: { state: "done", event: "Stop" },
-  // An abort is your decision, not a failure, so no red. It is also not a completion, so
-  // no green. SessionStart is the only upstream event that renders Idle / Ready, which is
-  // what a cancelled turn actually is: nothing running and nothing achieved. SessionEnd
-  // and Stop both render Completed, which is why cancelling used to finish green.
-  abort: { state: "idle", event: "SessionStart" },
   error: { state: "error", event: "PostToolUseFailure" },
   // A retry is a recoverable failure, which is upstream's own definition of
   // Blocked / Error. Reuse the error colour rather than add a sixth program: the point is
@@ -207,19 +196,17 @@ const SIGNALS = {
   resume: { state: "busy", event: "PostToolUse" },
 }
 
-const TERMINAL = new Set(["idle", "abort", "error"])
+const TERMINAL = new Set(["idle", "error"])
 
 function stateFor(signal) {
   const wanted = SIGNALS[signal].state
   if (signal === "ask") waiting = true
-  if (signal === "start" || signal === "reply" || signal === "idle" || signal === "abort" || signal === "error")
+  if (signal === "start" || signal === "reply" || signal === "idle" || signal === "error")
     waiting = false
   if (signal === "start") turnActive = true
   if (TERMINAL.has(signal)) turnActive = false
   if (signal === "retry") retrying = true
   if (signal === "resume" || signal === "start" || TERMINAL.has(signal)) retrying = false
-  if (signal === "abort") aborted = true
-  if (signal === "start") aborted = false
   // "hold" means a tool finished: stay amber if a prompt is still open.
   if (wanted === "hold") return waiting ? "waiting" : "busy"
   return wanted
@@ -297,8 +284,8 @@ if (selfCheck) {
     if (bytes > 512 || lines > 20) throw new Error(`${name} exceeds the controller: ${bytes} bytes, ${lines} lines`)
   }
 
-  const signals = ["start", "tool-start", "ask", "tool-end", "reply", "idle", "error", "abort"]
-  const want = ["busy", "busy", "waiting", "waiting", "busy", "done", "error", "idle"]
+  const signals = ["start", "tool-start", "ask", "tool-end", "reply", "idle", "error"]
+  const want = ["busy", "busy", "waiting", "waiting", "busy", "done", "error"]
   const got = signals.map(stateFor)
   if (got.join() !== want.join()) throw new Error(`state machine: got ${got.join()}, want ${want.join()}`)
 
@@ -321,7 +308,6 @@ if (selfCheck) {
   // turn so a late tool event cannot repaint cyan over a finished or cancelled turn.
   const flows = [
     [["start", "retry", "resume", "idle"], ["busy", "error", "busy", "done"]],
-    [["start", "abort"], ["busy", "idle"]],
   ]
   for (const [signals_, want_] of flows) {
     const seen = signals_.map(stateFor)
@@ -329,7 +315,7 @@ if (selfCheck) {
       throw new Error(`flow ${signals_.join(">")}: got ${seen.join()}, want ${want_.join()}`)
   }
   stateFor("start")
-  for (const terminal of ["idle", "abort", "error"]) {
+  for (const terminal of ["idle", "error"]) {
     stateFor("start")
     stateFor(terminal)
     if (turnActive) throw new Error(`${terminal} left the turn armed`)
@@ -356,7 +342,6 @@ if (selfCheck) {
     ask: "waiting_for_input",
     reply: "working",
     idle: "completed",
-    abort: "idle_ready",
     error: "blocked_error",
     retry: "blocked_error",
     resume: "working",
@@ -370,11 +355,13 @@ if (selfCheck) {
   // Real traces, captured from the desktop app with a logging probe. Replaying them is
   // the only check that would have caught green appearing after a cancel.
   const traces = {
+    // A cancel deliberately ends like a normal turn. Upstream filters Idle / Ready
+    // instantly, so there is no state that could show "cancelled" instead.
     "ctrl+g cancel": [
       ["chat.message", null, "busy"],
-      ["session.error", { error: { name: "MessageAbortedError" } }, "idle"],
-      ["session.idle", {}, "idle"],
-      ["session.idle", {}, "idle"],
+      ["session.error", { error: { name: "MessageAbortedError" } }, "done"],
+      ["session.idle", {}, "done"],
+      ["session.idle", {}, "done"],
     ],
     "normal finish": [
       ["chat.message", null, "busy"],
@@ -410,7 +397,9 @@ if (selfCheck) {
     if (!path) {
       console.log("   --send: no app socket, nothing to test")
     } else {
-      const ok = await send(path, "Stop", "selfcheck-session", process.cwd())
+      // SessionStart renders Idle / Ready, which upstream marks stale immediately, so
+      // this proves delivery without leaving a visible agent behind for 20 minutes.
+      const ok = await send(path, "SessionStart", "selfcheck-session", process.cwd())
       console.log(`   --send: ${ok ? "delivered to" : "FAILED against"} ${path}`)
       if (!ok) process.exitCode = 1
     }
