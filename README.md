@@ -61,7 +61,7 @@ second instance and the two fight over the device.
 | Cyan comet | The agent thinks or runs a tool. |
 | Amber breathing | A permission prompt or a multiple-choice question waits for you. |
 | Solid green | The turn finished. |
-| Red breathing | The turn failed. |
+| Red breathing | The turn failed, or opencode is retrying a failed provider call. |
 | Very dim breathing | You aborted the turn. |
 
 The green hold stays until the next turn starts. The device holds the last program, so the

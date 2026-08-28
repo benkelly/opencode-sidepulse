@@ -145,6 +145,16 @@ function signalForTool(tool, phase) {
 // per-session aggregation, so this only shapes direct mode.
 let waiting = false
 
+// True between a user message and the end of that turn. A cancelled turn can still settle
+// its in-flight tool, so tool.execute.after may arrive after session.error. Without this
+// guard that late event repaints cyan and the device spins forever on a dead turn.
+// Upstream guards the same way: a terminal Stop is never resurrected.
+let turnActive = false
+
+// opencode retries a failed provider call and reports it through session.status. Retries
+// are otherwise invisible, so a stalled turn looks exactly like a working one.
+let retrying = false
+
 // Each signal carries the LED state for direct mode and the upstream event name for app
 // mode. Both mappings are verified against the upstream collector.
 const SIGNALS = {
@@ -157,13 +167,24 @@ const SIGNALS = {
   // An abort is your decision, not a failure. Do not show red for it.
   abort: { state: "idle", event: "SessionEnd" },
   error: { state: "error", event: "PostToolUseFailure" },
+  // A retry is a recoverable failure, which is upstream's own definition of
+  // Blocked / Error. Reuse the error colour rather than add a sixth program: the point is
+  // that the turn has stalled, and a stall that looks like work is the whole problem.
+  retry: { state: "error", event: "PostToolUseFailure" },
+  resume: { state: "busy", event: "PostToolUse" },
 }
+
+const TERMINAL = new Set(["idle", "abort", "error"])
 
 function stateFor(signal) {
   const wanted = SIGNALS[signal].state
   if (signal === "ask") waiting = true
   if (signal === "start" || signal === "reply" || signal === "idle" || signal === "abort" || signal === "error")
     waiting = false
+  if (signal === "start") turnActive = true
+  if (TERMINAL.has(signal)) turnActive = false
+  if (signal === "retry") retrying = true
+  if (signal === "resume" || signal === "start" || TERMINAL.has(signal)) retrying = false
   // "hold" means a tool finished: stay amber if a prompt is still open.
   if (wanted === "hold") return waiting ? "waiting" : "busy"
   return wanted
@@ -209,10 +230,13 @@ export const SidePulse = async ({ directory } = {}) => {
       clearInterval(alive)
     },
     "chat.message": async (input) => report("start", input.sessionID, cwd),
+    // A cancelled turn can still settle its in-flight tool, so drop tool events that
+    // arrive after the turn ended. A new turn re-arms the guard through chat.message,
+    // so nothing is lost.
     "tool.execute.before": async (input) =>
-      report(signalForTool(input.tool, "before"), input.sessionID, cwd, input.tool),
+      turnActive && report(signalForTool(input.tool, "before"), input.sessionID, cwd, input.tool),
     "tool.execute.after": async (input) =>
-      report(signalForTool(input.tool, "after"), input.sessionID, cwd, input.tool),
+      turnActive && report(signalForTool(input.tool, "after"), input.sessionID, cwd, input.tool),
     event: async ({ event }) => {
       // permission.updated is the SDK v1 name and permission.asked is the v2 name.
       // Handle both, so a version bump does not silently stop the amber prompt.
@@ -222,6 +246,14 @@ export const SidePulse = async ({ directory } = {}) => {
       if (type === "permission.updated" || type === "permission.asked") return report("ask", session, cwd)
       if (type === "permission.replied") return report("reply", session, cwd)
       if (type === "session.idle") return report("idle", session, cwd)
+      // opencode reports a provider retry here and nowhere else. Report the stall once,
+      // and recover once it goes busy again, so a long backoff does not read as work.
+      if (type === "session.status") {
+        const status = props.status?.type
+        if (status === "retry" && !retrying) return report("retry", session, cwd)
+        if (status === "busy" && retrying) return report("resume", session, cwd)
+        return
+      }
       if (type === "session.error") {
         const aborted = props.error?.name === "MessageAbortedError"
         return report(aborted ? "abort" : "error", session, cwd)
@@ -264,6 +296,24 @@ if (selfCheck) {
     if (actual !== signal) throw new Error(`${tool}.${phase}: got ${actual}, want ${signal}`)
     const rendered = stateFor(actual)
     if (rendered !== state) throw new Error(`${tool}.${phase}: renders ${rendered}, want ${state}`)
+  }
+
+  // A retry must read as a stall and must recover, and a terminal signal must disarm the
+  // turn so a late tool event cannot repaint cyan over a finished or cancelled turn.
+  const flows = [
+    [["start", "retry", "resume", "idle"], ["busy", "error", "busy", "done"]],
+    [["start", "abort"], ["busy", "idle"]],
+  ]
+  for (const [signals_, want_] of flows) {
+    const seen = signals_.map(stateFor)
+    if (seen.join() !== want_.join())
+      throw new Error(`flow ${signals_.join(">")}: got ${seen.join()}, want ${want_.join()}`)
+  }
+  stateFor("start")
+  for (const terminal of ["idle", "abort", "error"]) {
+    stateFor("start")
+    stateFor(terminal)
+    if (turnActive) throw new Error(`${terminal} left the turn armed`)
   }
 
   console.log(`ok: ${Object.keys(PROGRAMS).length} programs, ${want.length} transitions`)
