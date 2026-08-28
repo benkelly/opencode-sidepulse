@@ -59,7 +59,7 @@ second instance and the two fight over the device.
 | LEDs | Meaning |
 | --- | --- |
 | Cyan comet | The agent thinks or runs a tool. |
-| Amber breathing | A permission prompt waits for you. |
+| Amber breathing | A permission prompt or a multiple-choice question waits for you. |
 | Solid green | The turn finished. |
 | Red breathing | The turn failed. |
 | Very dim breathing | You aborted the turn. |

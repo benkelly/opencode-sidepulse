@@ -126,6 +126,19 @@ function send(path, event, sessionID, cwd, tool) {
 
 // ------------------------------------------------------------------- dispatch
 
+// Tools that block on you instead of doing work. `question` is opencode's multiple-choice
+// prompt: tool.execute.before fires, then it waits for your answer for as long as you
+// take. Reported as work it shows the busy animation, and the device never signals that
+// it is your turn. A permission prompt arrives as an event, but this one arrives as a
+// tool, so it needs its own mapping.
+const BLOCKING_TOOLS = new Set(["question"])
+
+function signalForTool(tool, phase) {
+  const blocking = BLOCKING_TOOLS.has(tool)
+  if (phase === "before") return blocking ? "ask" : "tool-start"
+  return blocking ? "reply" : "tool-end"
+}
+
 // A permission prompt outranks a tool finishing, so a tool cannot stomp the amber
 // prompt back to cyan.
 // ponytail: one global flag, not per-session aggregation. In app mode the app does real
@@ -196,8 +209,10 @@ export const SidePulse = async ({ directory } = {}) => {
       clearInterval(alive)
     },
     "chat.message": async (input) => report("start", input.sessionID, cwd),
-    "tool.execute.before": async (input) => report("tool-start", input.sessionID, cwd, input.tool),
-    "tool.execute.after": async (input) => report("tool-end", input.sessionID, cwd, input.tool),
+    "tool.execute.before": async (input) =>
+      report(signalForTool(input.tool, "before"), input.sessionID, cwd, input.tool),
+    "tool.execute.after": async (input) =>
+      report(signalForTool(input.tool, "after"), input.sessionID, cwd, input.tool),
     event: async ({ event }) => {
       // permission.updated is the SDK v1 name and permission.asked is the v2 name.
       // Handle both, so a version bump does not silently stop the amber prompt.
@@ -235,6 +250,21 @@ if (selfCheck) {
   const want = ["busy", "busy", "waiting", "waiting", "busy", "done", "error", "idle"]
   const got = signals.map(stateFor)
   if (got.join() !== want.join()) throw new Error(`state machine: got ${got.join()}, want ${want.join()}`)
+
+  // A blocking tool must read as your turn, not as work. Both halves matter: amber while
+  // the prompt is open, and back to cyan once it is answered.
+  const routing = [
+    ["question", "before", "ask", "waiting"],
+    ["question", "after", "reply", "busy"],
+    ["bash", "before", "tool-start", "busy"],
+    ["bash", "after", "tool-end", "busy"],
+  ]
+  for (const [tool, phase, signal, state] of routing) {
+    const actual = signalForTool(tool, phase)
+    if (actual !== signal) throw new Error(`${tool}.${phase}: got ${actual}, want ${signal}`)
+    const rendered = stateFor(actual)
+    if (rendered !== state) throw new Error(`${tool}.${phase}: renders ${rendered}, want ${state}`)
+  }
 
   console.log(`ok: ${Object.keys(PROGRAMS).length} programs, ${want.length} transitions`)
   console.log(`   device     ${mount() ?? "not mounted"}`)
