@@ -1,6 +1,6 @@
 {
   "name": "opencode-sidepulse",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Show opencode agent status on a SidePulse Pro or SidePulse Dot LED device.",
   "keywords": [
     "opencode",

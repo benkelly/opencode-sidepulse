@@ -194,8 +194,11 @@ const SIGNALS = {
   ask: { state: "waiting", event: "PermissionRequest" },
   reply: { state: "busy", event: "UserPromptSubmit" },
   idle: { state: "done", event: "Stop" },
-  // An abort is your decision, not a failure. Do not show red for it.
-  abort: { state: "idle", event: "SessionEnd" },
+  // An abort is your decision, not a failure, so no red. It is also not a completion, so
+  // no green. SessionStart is the only upstream event that renders Idle / Ready, which is
+  // what a cancelled turn actually is: nothing running and nothing achieved. SessionEnd
+  // and Stop both render Completed, which is why cancelling used to finish green.
+  abort: { state: "idle", event: "SessionStart" },
   error: { state: "error", event: "PostToolUseFailure" },
   // A retry is a recoverable failure, which is upstream's own definition of
   // Blocked / Error. Reuse the error colour rather than add a sixth program: the point is
@@ -330,6 +333,38 @@ if (selfCheck) {
     stateFor("start")
     stateFor(terminal)
     if (turnActive) throw new Error(`${terminal} left the turn armed`)
+  }
+
+  // In app mode the app owns the display, so the event we send matters more than the
+  // local state. These mode mappings were measured against a live menu-bar app by
+  // sending each event and reading back latest.json. Checking the local state alone
+  // missed a cancel finishing green, because SessionEnd renders as Completed.
+  const APP_MODES = {
+    SessionStart: "idle_ready",
+    UserPromptSubmit: "working",
+    PreToolUse: "tool_running",
+    PostToolUse: "working",
+    PermissionRequest: "waiting_for_input",
+    PostToolUseFailure: "blocked_error",
+    Stop: "completed",
+    SessionEnd: "completed",
+  }
+  const WANT_APP_MODE = {
+    start: "working",
+    "tool-start": "tool_running",
+    "tool-end": "working",
+    ask: "waiting_for_input",
+    reply: "working",
+    idle: "completed",
+    abort: "idle_ready",
+    error: "blocked_error",
+    retry: "blocked_error",
+    resume: "working",
+  }
+  for (const [signal, wantMode] of Object.entries(WANT_APP_MODE)) {
+    const event = SIGNALS[signal].event
+    if (APP_MODES[event] !== wantMode)
+      throw new Error(`${signal} sends ${event}, which the app renders as ${APP_MODES[event]}, want ${wantMode}`)
   }
 
   // Real traces, captured from the desktop app with a logging probe. Replaying them is
