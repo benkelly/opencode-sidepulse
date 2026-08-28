@@ -139,6 +139,25 @@ function signalForTool(tool, phase) {
   return blocking ? "reply" : "tool-end"
 }
 
+// Map a bus event to a signal, or null to ignore it. Kept separate from the hook so the
+// captured cancel and retry traces can be replayed in the self-check.
+function signalForEvent(type, props) {
+  // permission.updated is the SDK v1 name and permission.asked is the v2 name. A live
+  // trace shows permission.asked, so both are needed across versions.
+  if (type === "permission.updated" || type === "permission.asked") return "ask"
+  if (type === "permission.replied") return "reply"
+  // A cancelled turn ends with session.idle. Suppress it, or green overwrites the abort.
+  if (type === "session.idle") return aborted ? null : "idle"
+  if (type === "session.error")
+    return props.error?.name === "MessageAbortedError" ? "abort" : "error"
+  if (type === "session.status") {
+    const status = props.status?.type
+    if (status === "retry" && !retrying) return "retry"
+    if (status === "busy" && retrying) return "resume"
+  }
+  return null
+}
+
 // A permission prompt outranks a tool finishing, so a tool cannot stomp the amber
 // prompt back to cyan.
 // ponytail: one global flag, not per-session aggregation. In app mode the app does real
@@ -154,6 +173,17 @@ let turnActive = false
 // opencode retries a failed provider call and reports it through session.status. Retries
 // are otherwise invisible, so a stalled turn looks exactly like a working one.
 let retrying = false
+
+// A cancelled turn emits session.error with MessageAbortedError and then session.idle,
+// twice, about a millisecond later. Captured from a real ctrl+g cancel:
+//
+//   session.error  error=MessageAbortedError
+//   session.idle
+//   session.idle
+//
+// Untracked, the dim abort state is repainted green as though the turn had finished.
+// The flag survives until the next turn, so the repeat is covered too.
+let aborted = false
 
 // Each signal carries the LED state for direct mode and the upstream event name for app
 // mode. Both mappings are verified against the upstream collector.
@@ -185,6 +215,8 @@ function stateFor(signal) {
   if (TERMINAL.has(signal)) turnActive = false
   if (signal === "retry") retrying = true
   if (signal === "resume" || signal === "start" || TERMINAL.has(signal)) retrying = false
+  if (signal === "abort") aborted = true
+  if (signal === "start") aborted = false
   // "hold" means a tool finished: stay amber if a prompt is still open.
   if (wanted === "hold") return waiting ? "waiting" : "busy"
   return wanted
@@ -238,26 +270,10 @@ export const SidePulse = async ({ directory } = {}) => {
     "tool.execute.after": async (input) =>
       turnActive && report(signalForTool(input.tool, "after"), input.sessionID, cwd, input.tool),
     event: async ({ event }) => {
-      // permission.updated is the SDK v1 name and permission.asked is the v2 name.
-      // Handle both, so a version bump does not silently stop the amber prompt.
-      const type = event.type
       const props = event.properties ?? {}
-      const session = props.sessionID ?? props.session_id ?? "unknown"
-      if (type === "permission.updated" || type === "permission.asked") return report("ask", session, cwd)
-      if (type === "permission.replied") return report("reply", session, cwd)
-      if (type === "session.idle") return report("idle", session, cwd)
-      // opencode reports a provider retry here and nowhere else. Report the stall once,
-      // and recover once it goes busy again, so a long backoff does not read as work.
-      if (type === "session.status") {
-        const status = props.status?.type
-        if (status === "retry" && !retrying) return report("retry", session, cwd)
-        if (status === "busy" && retrying) return report("resume", session, cwd)
-        return
-      }
-      if (type === "session.error") {
-        const aborted = props.error?.name === "MessageAbortedError"
-        return report(aborted ? "abort" : "error", session, cwd)
-      }
+      const signal = signalForEvent(event.type, props)
+      if (!signal) return
+      return report(signal, props.sessionID ?? props.session_id ?? "unknown", cwd)
     },
   }
 }
@@ -314,6 +330,35 @@ if (selfCheck) {
     stateFor("start")
     stateFor(terminal)
     if (turnActive) throw new Error(`${terminal} left the turn armed`)
+  }
+
+  // Real traces, captured from the desktop app with a logging probe. Replaying them is
+  // the only check that would have caught green appearing after a cancel.
+  const traces = {
+    "ctrl+g cancel": [
+      ["chat.message", null, "busy"],
+      ["session.error", { error: { name: "MessageAbortedError" } }, "idle"],
+      ["session.idle", {}, "idle"],
+      ["session.idle", {}, "idle"],
+    ],
+    "normal finish": [
+      ["chat.message", null, "busy"],
+      ["session.idle", {}, "done"],
+    ],
+    "provider retry": [
+      ["chat.message", null, "busy"],
+      ["session.status", { status: { type: "retry" } }, "error"],
+      ["session.status", { status: { type: "busy" } }, "busy"],
+      ["session.idle", {}, "done"],
+    ],
+  }
+  for (const [name, steps] of Object.entries(traces)) {
+    let state = null
+    for (const [type, props, want] of steps) {
+      const signal = type === "chat.message" ? "start" : signalForEvent(type, props)
+      if (signal) state = stateFor(signal)
+      if (state !== want) throw new Error(`${name}: after ${type} state is ${state}, want ${want}`)
+    }
   }
 
   console.log(`ok: ${Object.keys(PROGRAMS).length} programs, ${want.length} transitions`)
