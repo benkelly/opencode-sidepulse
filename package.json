@@ -31,6 +31,6 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bun plugin.mjs"
+    "test": "node plugin.mjs"
   }
 }

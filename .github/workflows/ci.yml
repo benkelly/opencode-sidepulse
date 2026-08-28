@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      # The package has no dependencies and no lockfile, so there is nothing to install.
+      # The self-check needs no device and no socket: it reports both as absent and exits 0.
+      - run: npm test
+
+  publish:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for npm trusted publishing over OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false # never cache in a release build
+
+      # Publishing a version that already exists fails with 409, so only publish when the
+      # version in package.json differs from the registry. Bump the version in the pull
+      # request, and the merge releases it.
+      - id: version
+        run: |
+          local_version=$(node -p "require('./package.json').version")
+          remote_version=$(npm view opencode-sidepulse version 2>/dev/null || echo none)
+          echo "local=$local_version remote=$remote_version"
+          if [ "$local_version" = "$remote_version" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # No NODE_AUTH_TOKEN. OIDC authenticates this workflow, and npm adds provenance.
+      - if: steps.version.outputs.changed == 'true'
+        run: npm publish
