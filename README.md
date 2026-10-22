@@ -24,8 +24,9 @@ Install the opencode-sidepulse plugin for me.
 1. Find my opencode config. Prefer the global file at
    ~/.config/opencode/opencode.json or ~/.config/opencode/opencode.jsonc. Create the
    global file if neither exists, with only {"$schema": "https://opencode.ai/config.json"}.
-2. Add the string "opencode-sidepulse" to the top-level "plugin" array. The value is an
-   array of strings. Create the array if it is absent. Keep every existing entry.
+2. Add the string "opencode-sidepulse" to the top-level plugin array. The key is
+   "plugins" on OpenCode 2 and "plugin" on OpenCode 1. Run `opencode --version` to find
+   the version. Create the array if it is absent. Keep every existing entry.
 3. Make sure that exactly one sidepulse entry loads. Check
    ~/.config/opencode/plugins/, ~/.config/opencode/plugin/, .opencode/plugins/ and
    .opencode/plugin/ for any file that writes to LEDS.LED. Delete any copy you find,
@@ -37,7 +38,13 @@ Do not change any other config field.
 
 ### Option 2: edit the config yourself
 
-Add the plugin to `opencode.json` or `~/.config/opencode/opencode.jsonc`:
+On OpenCode 2, run this command:
+
+```sh
+opencode plugin add opencode-sidepulse
+```
+
+On OpenCode 1, add the plugin to `opencode.json` or `~/.config/opencode/opencode.jsonc`:
 
 ```json
 {
@@ -45,6 +52,8 @@ Add the plugin to `opencode.json` or `~/.config/opencode/opencode.jsonc`:
   "plugin": ["opencode-sidepulse"]
 }
 ```
+
+OpenCode 2 uses the key `plugins` in place of `plugin`.
 
 opencode installs the package from npm at startup, so you do not run `npm install`.
 
@@ -106,7 +115,8 @@ file write is the whole interface.
 ## Requirements
 
 - macOS.
-- opencode.
+- OpenCode 2, or OpenCode 1.17.20 or newer. Older OpenCode 1 releases are not tested. If
+  the plugin does not load on one of them, use `opencode-sidepulse@0.1.7`.
 - A SidePulse Pro or SidePulse Dot.
 
 The plugin needs no dependencies and no build step. It uses only Node standard library
@@ -129,8 +139,8 @@ Without a clone, check that the published package imports:
 
 ```sh
 bunx --package opencode-sidepulse bun -e \
-  'import("opencode-sidepulse").then(m => console.log(Object.keys(m).join(",")))'
-# SidePulse,default
+  'import("opencode-sidepulse").then(m => console.log(Object.keys(m).join(","), m.default.id))'
+# default opencode-sidepulse
 ```
 
 That confirms the package only. Use a clone for the self-check and the demo.
