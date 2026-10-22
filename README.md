@@ -115,8 +115,8 @@ file write is the whole interface.
 ## Requirements
 
 - macOS.
-- OpenCode 2, or OpenCode 1.18.29 or newer. Older OpenCode 1 releases cannot load the
-  plugin. Use `opencode-sidepulse@0.1.7` on those releases.
+- OpenCode 2, or OpenCode 1.17.20 or newer. Older OpenCode 1 releases are not tested. If
+  the plugin does not load on one of them, use `opencode-sidepulse@0.1.7`.
 - A SidePulse Pro or SidePulse Dot.
 
 The plugin needs no dependencies and no build step. It uses only Node standard library

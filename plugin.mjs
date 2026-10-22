@@ -266,7 +266,7 @@ function onEvent(event, cwd) {
   return report(signal, props.sessionID ?? props.session_id ?? "unknown", cwd)
 }
 
-// One default export: OpenCode v1 (1.18.29 and newer) calls server(), v2 calls setup().
+// One default export: OpenCode v1 calls server(), v2 calls setup(). Tested on 1.17.20.
 // No named export, because v1 can load it as a second instance that fights for the device.
 // NOTE: no paint on init, because opencode re-initializes plugins during a session.
 const plugin = {
