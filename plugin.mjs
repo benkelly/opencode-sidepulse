@@ -150,6 +150,11 @@ function signalForEvent(type, props) {
   if (type === "permission.updated" || type === "permission.asked") return "ask"
   if (type === "permission.replied") return "reply"
   if (type === "session.idle") return "idle"
+  // OpenCode v2 ends a turn with one of these three events, and sends no session.idle
+  // or session.error.
+  if (type === "session.execution.succeeded") return "idle"
+  if (type === "session.execution.failed") return "error"
+  if (type === "session.execution.interrupted") return "idle"
   if (type === "session.error")
     // A cancel is not a failure, so it must not go red. It gets no state of its own
     // beyond that: upstream sets IDLE_VISIBLE_SECONDS to 0, so an Idle / Ready status is
@@ -230,14 +235,9 @@ async function report(signal, sessionID, cwd, tool) {
   } catch {}
 }
 
-// ponytail: paint nothing on init. opencode disposes and re-initializes plugins during a
-// session, so an init paint would stomp the live state back to idle. The device holds its
-// last program anyway, and shows INIT.LED on power-up.
-export const SidePulse = async ({ directory } = {}) => {
-  const cwd = directory ?? process.cwd()
-
-  // The MacBook SD reader cuts power to the device after three minutes of inactivity.
-  // The app does its own keepalive, so only do it when the app is absent.
+// The MacBook SD reader cuts power to the device after three minutes of inactivity.
+// The app does its own keepalive, so only do it when the app is absent.
+function keepalive() {
   const alive = setInterval(() => {
     if (socket()) return
     const dir = mount()
@@ -249,29 +249,64 @@ export const SidePulse = async ({ directory } = {}) => {
   }, 60_000)
   // Do not hold the process open on exit.
   alive.unref?.()
-
-  return {
-    dispose: async () => {
-      clearInterval(alive)
-    },
-    "chat.message": async (input) => report("start", input.sessionID, cwd),
-    // A cancelled turn can still settle its in-flight tool, so drop tool events that
-    // arrive after the turn ended. A new turn re-arms the guard through chat.message,
-    // so nothing is lost.
-    "tool.execute.before": async (input) =>
-      turnActive && report(signalForTool(input.tool, "before"), input.sessionID, cwd, input.tool),
-    "tool.execute.after": async (input) =>
-      turnActive && report(signalForTool(input.tool, "after"), input.sessionID, cwd, input.tool),
-    event: async ({ event }) => {
-      const props = event.properties ?? {}
-      const signal = signalForEvent(event.type, props)
-      if (!signal) return
-      return report(signal, props.sessionID ?? props.session_id ?? "unknown", cwd)
-    },
-  }
+  return () => clearInterval(alive)
 }
 
-export default SidePulse
+// A cancelled turn can still settle its in-flight tool, so drop tool events that arrive
+// after the turn ended. A new turn re-arms the guard, so nothing is lost.
+function onTool(phase, tool, sessionID, cwd) {
+  return turnActive && report(signalForTool(tool, phase), sessionID, cwd, tool)
+}
+
+// v1 events carry their payload in `properties`, v2 events in `data`.
+function onEvent(event, cwd) {
+  const props = event.properties ?? event.data ?? {}
+  const signal = signalForEvent(event.type, props)
+  if (!signal) return
+  return report(signal, props.sessionID ?? props.session_id ?? "unknown", cwd)
+}
+
+// One default export: OpenCode v1 (1.18.29 and newer) calls server(), v2 calls setup().
+// No named export, because v1 can load it as a second instance that fights for the device.
+// NOTE: no paint on init, because opencode re-initializes plugins during a session.
+const plugin = {
+  id: "opencode-sidepulse",
+
+  async server({ directory } = {}) {
+    const cwd = directory ?? process.cwd()
+    const stop = keepalive()
+    return {
+      dispose: async () => stop(),
+      "chat.message": async (input) => report("start", input.sessionID, cwd),
+      "tool.execute.before": async (input) => onTool("before", input.tool, input.sessionID, cwd),
+      "tool.execute.after": async (input) => onTool("after", input.tool, input.sessionID, cwd),
+      event: async ({ event }) => onEvent(event, cwd),
+    }
+  },
+
+  async setup(ctx) {
+    const cwd = ctx.location?.directory ?? process.cwd()
+    const stop = keepalive()
+    const controller = new AbortController()
+    await ctx.session.hook("prompt", (e) => report("start", e.sessionID, cwd))
+    await ctx.tool.hook("execute.before", (e) => onTool("before", e.tool, e.sessionID, cwd))
+    await ctx.tool.hook("execute.after", (e) => onTool("after", e.tool, e.sessionID, cwd))
+    // The stream ends on abort. Swallow that, and any other stream error, so the status
+    // light can never break opencode.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal }))
+          await onEvent(event, cwd)
+      } catch {}
+    })()
+    return () => {
+      controller.abort()
+      stop()
+    }
+  },
+}
+
+export default plugin
 
 // Self-check. Run it with: node plugin.mjs   (also works under bun)
 //   --demo   walk every LED state on the device, four seconds each
@@ -376,6 +411,22 @@ if (selfCheck) {
       ["session.status", { status: { type: "busy" } }, "busy"],
       ["session.idle", {}, "done"],
     ],
+    // OpenCode 2.1.2 traces, captured with a logging probe plugin.
+    "v2 normal finish": [
+      ["chat.message", null, "busy"],
+      ["session.execution.started", {}, "busy"],
+      ["session.execution.succeeded", {}, "done"],
+    ],
+    "v2 cancel": [
+      ["chat.message", null, "busy"],
+      ["session.execution.started", {}, "busy"],
+      ["session.execution.interrupted", { reason: "user" }, "done"],
+    ],
+    "v2 failure": [
+      ["chat.message", null, "busy"],
+      ["session.execution.started", {}, "busy"],
+      ["session.execution.failed", { error: { type: "provider.no-route" } }, "error"],
+    ],
   }
   for (const [name, steps] of Object.entries(traces)) {
     let state = null
@@ -385,6 +436,10 @@ if (selfCheck) {
       if (state !== want) throw new Error(`${name}: after ${type} state is ${state}, want ${want}`)
     }
   }
+
+  // v1 needs server(), and v2 needs id and setup().
+  if (typeof plugin.id !== "string" || typeof plugin.server !== "function" || typeof plugin.setup !== "function")
+    throw new Error("default export needs id, server() and setup()")
 
   for (const name of ["SidePulse", "SidePulsePro", "PulseDot"]) {
     if (!VOLUME.test(name)) throw new Error(`volume ${name} does not match ${VOLUME}`)
