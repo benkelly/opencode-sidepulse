@@ -33,13 +33,16 @@ const PROGRAMS = {
   done: "#00ff22 0.6s cosine\n",
 }
 
-// Volume names differ by model (SidePulse, SidePulsePro, SidePulseDot), so match the
-// prefix and confirm the control file exists.
+// Volume names differ by model (SidePulse, SidePulsePro, PulseDot), so match the prefix
+// and confirm the control file exists. The Dot is FAT12, and its 11-character label limit
+// rules out "SidePulseDot".
+const VOLUME = /^(sidepulse|pulsedot)/i
+
 function mount() {
   try {
     for (const name of readdirSync("/Volumes")) {
       const dir = join("/Volumes", name)
-      if (/^sidepulse/i.test(name) && existsSync(join(dir, "LEDS.LED"))) return dir
+      if (VOLUME.test(name) && existsSync(join(dir, "LEDS.LED"))) return dir
     }
   } catch {}
   return undefined
@@ -382,6 +385,11 @@ if (selfCheck) {
       if (state !== want) throw new Error(`${name}: after ${type} state is ${state}, want ${want}`)
     }
   }
+
+  for (const name of ["SidePulse", "SidePulsePro", "PulseDot"]) {
+    if (!VOLUME.test(name)) throw new Error(`volume ${name} does not match ${VOLUME}`)
+  }
+  if (VOLUME.test("Macintosh HD")) throw new Error(`volume Macintosh HD matches ${VOLUME}`)
 
   console.log(`ok: ${Object.keys(PROGRAMS).length} programs, ${want.length} transitions`)
   console.log(`   device     ${mount() ?? "not mounted"}`)
