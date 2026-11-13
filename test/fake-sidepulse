@@ -1,0 +1,26 @@
+#!/bin/sh
+# A stand-in for the `sidepulse` CLI. It records every report it is given and answers the
+# way the real command does: exit 0 when the service accepted the report, 1 when no
+# service answers, 2 for a command it does not know.
+#
+# The test controls it through files in $FAKE_SIDEPULSE_DIR:
+#   up           present: the service is running
+#   delay-once   seconds to wait before answering, used up by the first call that sees it
+#   hang         present: never answer
+# It writes:
+#   reports.jsonl    one accepted report per line
+#   declined.jsonl   one report per line that arrived while the service was down
+dir=${FAKE_SIDEPULSE_DIR:?}
+[ "$1" = report ] && [ "$2" = --json ] || exit 2
+body=$(cat)
+[ -e "$dir/hang" ] && exec sleep 30
+if [ -e "$dir/delay-once" ]; then
+  delay=$(cat "$dir/delay-once")
+  rm -f "$dir/delay-once"
+  sleep "$delay"
+fi
+if [ ! -e "$dir/up" ]; then
+  printf '%s\n' "$body" >> "$dir/declined.jsonl"
+  exit 1
+fi
+printf '%s\n' "$body" >> "$dir/reports.jsonl"

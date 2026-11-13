@@ -1,6 +1,6 @@
 {
   "name": "opencode-sidepulse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Show opencode agent status on a SidePulse Pro or SidePulse Dot LED device.",
   "keywords": [
     "opencode",
@@ -31,6 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node plugin.mjs"
+    "test": "node plugin.mjs && node test/run.mjs",
+    "test:mutation": "npx --yes @stryker-mutator/core@10.1.1 run"
   }
 }

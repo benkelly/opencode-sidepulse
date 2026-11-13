@@ -1,18 +1,20 @@
+import { spawn, spawnSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { existsSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
-import { createConnection } from "node:net"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
 // Two ways to drive a SidePulse device, picked per event:
 //
-//   App mode    The SidePulse menu-bar app is running. Send hook events to its Unix
-//               socket and never touch LEDS.LED. The app aggregates opencode with
-//               Codex/Claude/Grok and owns the display, so there is no write conflict.
-//   Direct mode No app. Write an LED program straight to LEDS.LED.
+//   App mode    The SidePulse background service is running. Report each session's status
+//               with `sidepulse report --json` and never touch LEDS.LED. The service
+//               aggregates opencode with Codex/Claude/Grok and owns the display, so there
+//               is no write conflict.
+//   Direct mode No service. Write an LED program straight to LEDS.LED.
 //
 // Both paths are documented by the upstream project:
-//   socket protocol  https://github.com/inteliwear/sidepulse/blob/main/src/sidepulse/ipc.py
-//   LED DSL          https://github.com/inteliwear/sidepulse/blob/main/LEDS_FORMAT.md
+//   status reports  https://github.com/inteliwear/sidepulse/blob/main/docs/protocol/program-status.md
+//   LED DSL         https://github.com/inteliwear/sidepulse/blob/main/LEDS_FORMAT.md
 
 // ---------------------------------------------------------------- direct mode
 
@@ -38,10 +40,13 @@ const PROGRAMS = {
 // rules out "SidePulseDot".
 const VOLUME = /^(sidepulse|pulsedot)/i
 
+// macOS mounts the device under /Volumes. The override lets the tests use a plain folder.
+const VOLUMES = process.env.SIDEPULSE_VOLUMES || "/Volumes"
+
 function mount() {
   try {
-    for (const name of readdirSync("/Volumes")) {
-      const dir = join("/Volumes", name)
+    for (const name of readdirSync(VOLUMES)) {
+      const dir = join(VOLUMES, name)
       if (VOLUME.test(name) && existsSync(join(dir, "LEDS.LED"))) return dir
     }
   } catch {}
@@ -69,63 +74,138 @@ function write(state) {
 
 // ------------------------------------------------------------------- app mode
 
-// Upstream default_state_dir() honors XDG_STATE_HOME from its OWN environment. The app is
-// launched by launchd and usually has none, while opencode may well have one set (the
-// opencode desktop app sets it per-app). The two processes therefore disagree on the path,
-// so probe every candidate instead of computing one.
-const CANDIDATES = [
-  ...new Set([
-    ...(process.env.XDG_STATE_HOME ? [process.env.XDG_STATE_HOME] : []),
-    join(homedir(), ".local", "state"),
-  ]),
-].map((base) => join(base, "sidepulse", "agent-monitor", "events.sock"))
+// The service keeps one status per session and renders the LEDs itself. Its documented
+// input is the `sidepulse report` command, so nothing here depends on socket paths or the
+// wire format. The command exits non-zero when no service answers, and that exit code is
+// what selects direct mode.
+//
+// This replaces the app's events.sock. That socket still accepts a connection, but since
+// upstream moved session state into the service it ignores everything except "open
+// settings". The old transport therefore reported success while the device showed nothing.
 
-function socket() {
-  return CANDIDATES.find((path) => existsSync(path))
+// The upstream installer puts the CLI in ~/.local/bin. The opencode desktop app is started
+// by launchd and often has no such entry on PATH, so look there before trusting PATH.
+function command() {
+  if (process.env.SIDEPULSE_BIN) return process.env.SIDEPULSE_BIN
+  const installed = join(homedir(), ".local", "bin", "sidepulse")
+  return existsSync(installed) ? installed : "sidepulse"
 }
 
-// The app reads one JSON object per connection and stops at EOF, so the client must
-// half-close after writing. end(payload) writes and then sends FIN, which is that EOF.
-// Upstream caps a message at 1 MiB; ours are tiny.
-//
-// Use node:net, not Bun.connect. Bun globals are not reachable from an npm-installed
-// plugin, so Bun.connect threw ReferenceError, the catch below swallowed it, and app mode
-// silently degraded to direct mode. node:net is stdlib and works under any runtime.
-//
-// Any failure resolves false so the caller falls back to direct mode instead of throwing
-// into a hook.
-function send(path, event, sessionID, cwd, tool) {
-  const payload = JSON.stringify({
-    provider: "opencode",
-    line: {
-      hook_event_name: event,
-      session_id: sessionID,
-      cwd,
-      // Upstream origin_label_from_payload() reads this key, so the app labels the agent
-      // instead of leaving origin empty. Providers it does not know get no origin at all.
-      agent_origin: "opencode",
-      ...(tool ? { tool_name: tool } : {}),
-    },
-  })
+const ARGS = ["report", "--json"]
+const STDIO = ["pipe", "ignore", "ignore"]
+// The CLI gives the service half a second. The rest is Python startup.
+const REPORT_TIMEOUT_MS = Number(process.env.SIDEPULSE_REPORT_TIMEOUT_MS) || 5000
+
+// Resolves true only when the service accepted the report. A missing CLI, a stopped
+// service and a hung process all resolve false, so the caller falls back to direct mode
+// instead of throwing into a hook.
+function run(body) {
   return new Promise((resolve) => {
-    let socket
-    // Never let a hung socket stall a turn. Upstream uses a 200 ms timeout; match it.
-    const timer = setTimeout(() => {
-      socket?.destroy()
-      resolve(false)
-    }, 200)
+    let child
+    const timer = setTimeout(() => child?.kill(), REPORT_TIMEOUT_MS)
+    timer.unref?.()
     const finish = (ok) => {
       clearTimeout(timer)
       resolve(ok)
     }
     try {
-      socket = createConnection({ path }, () => socket.end(payload, () => finish(true)))
-      socket.on("error", () => finish(false))
+      // Detached and unref'd, so a report never holds the process open and is not taken
+      // down with opencode's process group.
+      child = spawn(command(), ARGS, { detached: true, stdio: STDIO, windowsHide: true })
+      child.once("error", () => finish(false))
+      child.once("exit", (code) => finish(code === 0))
+      child.stdin.on("error", () => {})
+      child.stdin.end(body)
+      child.unref()
     } catch {
       finish(false)
     }
   })
 }
+
+// One report for the service. Only identity and state: no prompt, tool input or output.
+function reportBody(sessionID, status, cwd) {
+  return JSON.stringify({
+    v: 1,
+    type: "program_status",
+    scope: `opencode-${sessionID}`,
+    request_id: randomUUID(),
+    status: { ...status, app: "opencode" },
+    context: { provider: "opencode", session_id: sessionID, ...(cwd ? { cwd } : {}) },
+  })
+}
+
+// True while the service accepts reports. It owns the LEDs and the keepalive then.
+let appAlive = false
+
+// The LED state the service last declined. Direct mode owns that state until it changes.
+let declined
+
+// Reports go out one at a time and in order. Each one is a separate process, so two in
+// flight could land swapped, and the service never expires a Working status on its own:
+// a "working" that overtakes its "done" would spin until the service restarts.
+const pending = []
+let inflight
+
+async function pump() {
+  if (inflight) return
+  while ((inflight = pending.shift())) {
+    try {
+      const ok = await run(inflight.body)
+      // The exit flush below may have taken this report over while it was in flight.
+      if (inflight) settle(inflight, ok)
+    } catch {}
+    inflight = undefined
+  }
+}
+
+function settle(job, ok) {
+  appAlive = ok
+  if (ok) {
+    declined = undefined
+    shown = undefined // the service owns the LEDs now; repaint if we take over later
+    return
+  }
+  // Not delivered, so the next event for this session must be reported again.
+  if (reported.get(job.sessionID) === job.key) reported.delete(job.sessionID)
+  // A clear has no LED state. It only tidies the service.
+  if (!job.state) return
+  declined = job.state
+  write(job.state)
+}
+
+// `opencode run` exits as soon as the turn ends, with the final report still queued or in
+// flight. Send what is left synchronously. The report in flight goes first so the queue
+// cannot overtake it. It is sent again even when nothing is queued behind it: its process
+// is detached, but its body may not have left this process yet, and Bun drops a body that
+// was written in the same tick as the exit. It keeps its request_id, and the service
+// applies a repeated request_id only once, so a second copy changes nothing.
+//
+// A session still working or waiting at exit can never finish, and the service never
+// expires those states on its own: the device would stay lit for a prompt nobody can
+// answer. Clear those sessions. Done and error stay, because they are still news.
+process.once("exit", () => {
+  for (const [sessionID, key] of reported)
+    if (key.startsWith("working") || key.startsWith("blocked"))
+      pending.push({ sessionID, body: reportBody(sessionID, { state: "clear" }) })
+  const jobs = [...(inflight ? [inflight] : []), ...pending.splice(0)]
+  inflight = undefined
+  for (const job of jobs) {
+    // No service, so nothing to clear. Do not start a process per session to find out.
+    if (!job.state && !appAlive) continue
+    let ok = false
+    try {
+      const result = spawnSync(command(), ARGS, {
+        input: job.body,
+        stdio: STDIO,
+        timeout: REPORT_TIMEOUT_MS,
+        windowsHide: true,
+      })
+      ok = result.status === 0
+    } catch {}
+    settle(job, ok)
+  }
+})
 
 // ------------------------------------------------------------------- dispatch
 
@@ -172,8 +252,8 @@ function signalForEvent(type, props) {
 
 // A permission prompt outranks a tool finishing, so a tool cannot stomp the amber
 // prompt back to cyan.
-// ponytail: one global flag, not per-session aggregation. In app mode the app does real
-// per-session aggregation, so this only shapes direct mode.
+// ponytail: one global flag, not per-session aggregation. In app mode the service does
+// real per-session aggregation, so this only shapes direct mode.
 let waiting = false
 
 // True between a user message and the end of that turn. A cancelled turn can still settle
@@ -187,21 +267,24 @@ let turnActive = false
 let retrying = false
 
 
-// Each signal carries the LED state for direct mode and the upstream event name for app
-// mode. Both mappings are verified against the upstream collector.
+// Each signal carries the LED state for direct mode and the program-status state for app
+// mode. The service renders working, blocked, error and done as Working, Waiting for
+// Input, Blocked / Error and Completed.
 const SIGNALS = {
-  start: { state: "busy", event: "UserPromptSubmit" },
-  "tool-start": { state: "busy", event: "PreToolUse" },
-  "tool-end": { state: "hold", event: "PostToolUse" },
-  ask: { state: "waiting", event: "PermissionRequest" },
-  reply: { state: "busy", event: "UserPromptSubmit" },
-  idle: { state: "done", event: "Stop" },
-  error: { state: "error", event: "PostToolUseFailure" },
+  start: { state: "busy", status: "working" },
+  // Tool churn stays "working" in app mode. The service draws Tool Running exactly like
+  // Working, and an unchanged status is not reported, so tools cost no process spawn.
+  "tool-start": { state: "busy", status: "working" },
+  "tool-end": { state: "hold", status: "working" },
+  ask: { state: "waiting", status: "blocked" },
+  reply: { state: "busy", status: "working" },
+  idle: { state: "done", status: "done" },
+  error: { state: "error", status: "error" },
   // A retry is a recoverable failure, which is upstream's own definition of
   // Blocked / Error. Reuse the error colour rather than add a sixth program: the point is
   // that the turn has stalled, and a stall that looks like work is the whole problem.
-  retry: { state: "error", event: "PostToolUseFailure" },
-  resume: { state: "busy", event: "PostToolUse" },
+  retry: { state: "error", status: "error", msg: "Retrying a failed provider call" },
+  resume: { state: "busy", status: "working" },
 }
 
 const TERMINAL = new Set(["idle", "error"])
@@ -220,33 +303,65 @@ function stateFor(signal) {
   return wanted
 }
 
-// Never throw into a hook. A status light must not be able to break a turn.
-async function report(signal, sessionID, cwd, tool) {
+// App mode status. The service keeps one status per session, so the open prompt is tracked
+// per session here: the global flag above would let a prompt in one session mark another
+// session as blocked. A prompt outranks tool churn in its own session and nothing else.
+const prompts = new Map() // sessionID -> kind of the open prompt
+
+function statusFor(signal, sessionID, tool) {
+  if (signal === "ask") prompts.set(sessionID, BLOCKING_TOOLS.has(tool) ? "question" : "permission")
+  else if (signal !== "tool-start" && signal !== "tool-end") prompts.delete(sessionID)
+  const kind = prompts.get(sessionID)
+  if (kind) return { state: "blocked", kind }
+  const { status, msg } = SIGNALS[signal]
+  return { state: status, ...(msg ? { msg } : {}) }
+}
+
+// Sessions whose turn ended in an error. OpenCode 1 follows session.error with
+// session.idle, and that idle would paint a failed turn green. Measured on 1.19.5.
+const failed = new Set()
+
+// The last status handed to the queue for each session. An unchanged status is skipped.
+// ponytail: never pruned. It holds one short string per session for the process lifetime.
+const reported = new Map()
+
+// Never throw into a hook, and never make one wait: the report is queued and the hook
+// returns. A status light must not be able to break a turn or slow it down.
+function report(signal, sessionID, cwd, tool) {
   try {
+    if (signal === "error") failed.add(sessionID)
+    else if (signal !== "idle") failed.delete(sessionID)
+    else if (failed.has(sessionID)) return
     const state = stateFor(signal)
-    // Prefer the app. Only fall through when no socket answers, which also covers a
-    // stale socket file left behind by a crash.
-    const path = socket()
-    if (path && (await send(path, SIGNALS[signal].event, sessionID, cwd, tool))) {
-      shown = undefined // the app owns the LEDs now; repaint if we take over later
-      return
-    }
-    write(state)
+    const status = statusFor(signal, sessionID, tool)
+    const key = `${status.state}:${status.kind ?? ""}`
+    // The service has this status, or is about to.
+    if (reported.get(sessionID) === key) return
+    // Direct mode, and the service already declined this state. Paint, which is free when
+    // nothing changed, and ask the service again on the next change instead of starting a
+    // process for every tool call.
+    if (!appAlive && state === declined) return void write(state)
+    reported.set(sessionID, key)
+    pending.push({ state, sessionID, key, body: reportBody(sessionID, status, cwd) })
+    // Prefer the service. A report it does not accept falls back to direct mode in settle().
+    pump()
   } catch {}
 }
 
 // The MacBook SD reader cuts power to the device after three minutes of inactivity.
-// The app does its own keepalive, so only do it when the app is absent.
+// The service does its own keepalive, so only do it when the service is absent.
+function beat() {
+  if (appAlive) return
+  const dir = mount()
+  if (!dir) return
+  try {
+    const now = new Date()
+    utimesSync(join(dir, "keepalive"), now, now)
+  } catch {}
+}
+
 function keepalive() {
-  const alive = setInterval(() => {
-    if (socket()) return
-    const dir = mount()
-    if (!dir) return
-    try {
-      const now = new Date()
-      utimesSync(join(dir, "keepalive"), now, now)
-    } catch {}
-  }, 60_000)
+  const alive = setInterval(beat, 60_000)
   // Do not hold the process open on exit.
   alive.unref?.()
   return () => clearInterval(alive)
@@ -308,9 +423,10 @@ const plugin = {
 
 export default plugin
 
+// Stryker disable all: everything below is test code, not plugin code.
 // Self-check. Run it with: node plugin.mjs   (also works under bun)
 //   --demo   walk every LED state on the device, four seconds each
-//   --send   send one test event to a live app socket and report the result
+//   --send   send one test report through the sidepulse CLI and print the result
 // opencode imports this file, so this block stays out of the plugin path. import.meta.main
 // is a bun-ism, so check argv too, which keeps the check runnable under plain node.
 const selfCheck =
@@ -359,35 +475,40 @@ if (selfCheck) {
     if (turnActive) throw new Error(`${terminal} left the turn armed`)
   }
 
-  // In app mode the app owns the display, so the event we send matters more than the
-  // local state. These mode mappings were measured against a live menu-bar app by
-  // sending each event and reading back latest.json. Checking the local state alone
-  // missed a cancel finishing green, because SessionEnd renders as Completed.
-  const APP_MODES = {
-    SessionStart: "idle_ready",
-    UserPromptSubmit: "working",
-    PreToolUse: "tool_running",
-    PostToolUse: "working",
-    PermissionRequest: "waiting_for_input",
-    PostToolUseFailure: "blocked_error",
-    Stop: "completed",
-    SessionEnd: "completed",
-  }
-  const WANT_APP_MODE = {
+  // In app mode the service owns the display, so the status we report matters more than
+  // the local state. Checking the local state alone once missed a cancel finishing green.
+  const WANT_STATUS = {
     start: "working",
-    "tool-start": "tool_running",
+    "tool-start": "working",
     "tool-end": "working",
-    ask: "waiting_for_input",
+    ask: "blocked",
     reply: "working",
-    idle: "completed",
-    error: "blocked_error",
-    retry: "blocked_error",
+    idle: "done",
+    error: "error",
+    retry: "error",
     resume: "working",
   }
-  for (const [signal, wantMode] of Object.entries(WANT_APP_MODE)) {
-    const event = SIGNALS[signal].event
-    if (APP_MODES[event] !== wantMode)
-      throw new Error(`${signal} sends ${event}, which the app renders as ${APP_MODES[event]}, want ${wantMode}`)
+  for (const [signal, wantStatus] of Object.entries(WANT_STATUS)) {
+    const actual = statusFor(signal, "check-status").state
+    if (actual !== wantStatus) throw new Error(`${signal} reports ${actual}, want ${wantStatus}`)
+  }
+
+  // A prompt holds its own session at blocked through tool churn, names its kind, and
+  // leaves every other session alone.
+  const sessions = [
+    ["ask", "a", undefined, "blocked:permission"],
+    ["tool-end", "a", "bash", "blocked:permission"],
+    ["tool-start", "a", "bash", "blocked:permission"],
+    ["tool-end", "b", "bash", "working:"],
+    ["reply", "a", undefined, "working:"],
+    ["ask", "a", "question", "blocked:question"],
+    ["idle", "a", undefined, "done:"],
+    ["tool-end", "a", "bash", "working:"],
+  ]
+  for (const [signal, id, tool, wantKey] of sessions) {
+    const status = statusFor(signal, `check-${id}`, tool)
+    const actual = `${status.state}:${status.kind ?? ""}`
+    if (actual !== wantKey) throw new Error(`session ${id} ${signal}: reports ${actual}, want ${wantKey}`)
   }
 
   // Real traces, captured from the desktop app with a logging probe. Replaying them is
@@ -448,24 +569,25 @@ if (selfCheck) {
 
   console.log(`ok: ${Object.keys(PROGRAMS).length} programs, ${want.length} transitions`)
   console.log(`   device     ${mount() ?? "not mounted"}`)
-  console.log(`   app socket ${socket() ?? "absent, using direct mode"}`)
-  for (const path of CANDIDATES) console.log(`   probed     ${path}`)
+  console.log(`   app CLI    ${command()}`)
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-  // Exercise the real send(), so a broken transport cannot hide behind the direct-mode
+  // Exercise the real run(), so a broken transport cannot hide behind the direct-mode
   // fallback. This is the check that would have caught the Bun.connect regression.
   if (process.argv.includes("--send")) {
-    const path = socket()
-    if (!path) {
-      console.log("   --send: no app socket, nothing to test")
-    } else {
-      // SessionStart renders Idle / Ready, which upstream marks stale immediately, so
-      // this proves delivery without leaving a visible agent behind for 20 minutes.
-      const ok = await send(path, "SessionStart", "selfcheck-session", process.cwd())
-      console.log(`   --send: ${ok ? "delivered to" : "FAILED against"} ${path}`)
-      if (!ok) process.exitCode = 1
-    }
+    // run() unrefs its child so it can never hold opencode open. Nothing else is running
+    // here, so hold the process open until the CLI answers.
+    const hold = setInterval(() => {}, 1000)
+    // "clear" removes a session, so this proves delivery and leaves nothing in the menu.
+    const ok = await run(reportBody("selfcheck", { state: "clear" }))
+    clearInterval(hold)
+    console.log(
+      ok
+        ? "   --send: accepted by the SidePulse service"
+        : "   --send: NOT accepted. Check `sidepulse service status`. Direct mode would be used.",
+    )
+    if (!ok) process.exitCode = 1
   }
 
   if (process.argv.includes("--demo")) {
