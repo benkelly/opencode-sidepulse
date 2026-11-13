@@ -111,7 +111,9 @@ prompts, tool input or tool output.
 
 The plugin reports a session only when its state changes, so a run of tool calls costs
 nothing. Reports go out one at a time, in order. Any report still queued when opencode
-exits is sent before the process ends, so `opencode run` still finishes green.
+exits is sent before the process ends, so `opencode run` still finishes green. A session
+that is still working or waiting when opencode exits is cleared, because the service never
+expires those states by itself.
 
 The plugin looks for the command in `$SIDEPULSE_BIN`, then `~/.local/bin/sidepulse`, then
 `PATH`. The service needs no patch: `opencode` appears as a normal agent.
@@ -163,6 +165,8 @@ six times. Watch the device during `--demo` to confirm each state.
 
 - Direct mode tracks one state for all sessions. Run the SidePulse service if you need
   true per-session aggregation.
+- If opencode is killed mid-turn, the plugin cannot clear its sessions. They stay in the
+  SidePulse menu as Working until the service restarts.
 - App mode does not name the running tool. The service draws a running tool the same way
   as Working.
 - In direct mode the plugin touches `keepalive` once a minute. The MacBook SD card reader

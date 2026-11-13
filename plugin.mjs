@@ -120,8 +120,23 @@ function run(body) {
   })
 }
 
+// One report for the service. Only identity and state: no prompt, tool input or output.
+function reportBody(sessionID, status, cwd) {
+  return JSON.stringify({
+    v: 1,
+    type: "program_status",
+    scope: `opencode-${sessionID}`,
+    request_id: randomUUID(),
+    status: { ...status, app: "opencode" },
+    context: { provider: "opencode", session_id: sessionID, ...(cwd ? { cwd } : {}) },
+  })
+}
+
 // True while the service accepts reports. It owns the LEDs and the keepalive then.
 let appAlive = false
+
+// The LED state the service last declined. Direct mode owns that state until it changes.
+let declined
 
 // Reports go out one at a time and in order. Each one is a separate process, so two in
 // flight could land swapped, and the service never expires a Working status on its own:
@@ -132,9 +147,11 @@ let inflight
 async function pump() {
   if (inflight) return
   while ((inflight = pending.shift())) {
-    const ok = await run(inflight.body)
-    // The exit flush below may have taken this report over while it was in flight.
-    if (inflight) settle(inflight, ok)
+    try {
+      const ok = await run(inflight.body)
+      // The exit flush below may have taken this report over while it was in flight.
+      if (inflight) settle(inflight, ok)
+    } catch {}
     inflight = undefined
   }
 }
@@ -142,11 +159,15 @@ async function pump() {
 function settle(job, ok) {
   appAlive = ok
   if (ok) {
+    declined = undefined
     shown = undefined // the service owns the LEDs now; repaint if we take over later
     return
   }
   // Not delivered, so the next event for this session must be reported again.
   if (reported.get(job.sessionID) === job.key) reported.delete(job.sessionID)
+  // A clear has no LED state. It only tidies the service.
+  if (!job.state) return
+  declined = job.state
   write(job.state)
 }
 
@@ -154,13 +175,23 @@ function settle(job, ok) {
 // what is left synchronously. The report in flight goes first so the queue cannot overtake
 // it. It keeps its request_id, and the service applies a repeated request_id only once,
 // so the detached copy changes nothing when it lands.
+//
+// A session still working or waiting at exit can never finish, and the service never
+// expires those states on its own: the device would stay lit for a prompt nobody can
+// answer. Clear those sessions. Done and error stay, because they are still news.
 process.once("exit", () => {
+  if (appAlive || inflight)
+    for (const [sessionID, key] of reported)
+      if (key.startsWith("working") || key.startsWith("blocked"))
+        pending.push({ sessionID, key: "clear", body: reportBody(sessionID, { state: "clear" }) })
   const queued = pending.splice(0)
   // Nothing queued: the report in flight is detached and finishes on its own.
   if (!queued.length) return
   const jobs = inflight ? [inflight, ...queued] : queued
   inflight = undefined
   for (const job of jobs) {
+    // No service, so nothing to clear. Do not start a process per session to find out.
+    if (!job.state && !appAlive) continue
     let ok = false
     try {
       const result = spawnSync(command(), ARGS, {
@@ -298,23 +329,12 @@ function report(signal, sessionID, cwd, tool) {
     const key = `${status.state}:${status.kind ?? ""}`
     // The service has this status, or is about to.
     if (reported.get(sessionID) === key) return
-    // Direct mode already shows it. Ask the service again on the next change instead of
-    // starting a process for every tool call.
-    if (!appAlive && state === shown) return
+    // Direct mode, and the service already declined this state. Paint, which is free when
+    // nothing changed, and ask the service again on the next change instead of starting a
+    // process for every tool call.
+    if (!appAlive && state === declined) return void write(state)
     reported.set(sessionID, key)
-    pending.push({
-      state,
-      sessionID,
-      key,
-      body: JSON.stringify({
-        v: 1,
-        type: "program_status",
-        scope: `opencode-${sessionID}`,
-        request_id: randomUUID(),
-        status: { ...status, app: "opencode" },
-        context: { provider: "opencode", session_id: sessionID, cwd },
-      }),
-    })
+    pending.push({ state, sessionID, key, body: reportBody(sessionID, status, cwd) })
     // Prefer the service. A report it does not accept falls back to direct mode in settle().
     pump()
   } catch {}
@@ -549,15 +569,7 @@ if (selfCheck) {
     // here, so hold the process open until the CLI answers.
     const hold = setInterval(() => {}, 1000)
     // "clear" removes a session, so this proves delivery and leaves nothing in the menu.
-    const ok = await run(
-      JSON.stringify({
-        v: 1,
-        type: "program_status",
-        scope: "opencode-selfcheck",
-        request_id: randomUUID(),
-        status: { state: "clear", app: "opencode" },
-      }),
-    )
+    const ok = await run(reportBody("selfcheck", { state: "clear" }))
     clearInterval(hold)
     console.log(
       ok
