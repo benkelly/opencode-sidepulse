@@ -17,7 +17,8 @@ jobs:
         with:
           node-version: "24"
       # The package has no dependencies and no lockfile, so there is nothing to install.
-      # The self-check needs no device and no socket: it reports both as absent and exits 0.
+      # The self-check and the regression suite need no device, no SidePulse and no
+      # OpenCode. compat.yml runs the tests that do.
       - run: npm test
 
   publish:

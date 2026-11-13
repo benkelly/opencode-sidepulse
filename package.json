@@ -31,6 +31,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node plugin.mjs"
+    "test": "node plugin.mjs && node test/run.mjs",
+    "test:mutation": "npx --yes @stryker-mutator/core@10.1.1 run"
   }
 }

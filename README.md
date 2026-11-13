@@ -77,7 +77,7 @@ tell you things you cannot see. You already know that you cancelled it.
 
 
 The green hold stays until the next turn starts. The device holds the last program, so the
-plugin needs no timer to keep the color.
+plugin needs no timer to keep the color. A failed turn stays red the same way.
 
 ## Two modes
 
@@ -136,10 +136,10 @@ modules, so it runs the same under any opencode runtime.
 
 ## Test it
 
-From a clone of this repository, under `node` or `bun`:
+From a clone of this repository:
 
 ```sh
-node plugin.mjs          # program limits, state machine, device and CLI discovery
+npm test                 # the self-check, then the regression suite
 node plugin.mjs --send   # send one test report through the sidepulse CLI
 node plugin.mjs --demo   # walk every LED state on the real device, four seconds each
 ```
@@ -147,6 +147,37 @@ node plugin.mjs --demo   # walk every LED state on the real device, four seconds
 Use `--send` whenever you change the transport. App mode falls back to direct mode on any
 failure, so a broken transport is otherwise invisible. The test report clears a session
 that does not exist, so it leaves nothing in the menu.
+
+The tests come in four layers. None of them has a dependency to install.
+
+| Command | What it runs against | Needs |
+| --- | --- | --- |
+| `node test/run.mjs` | A fake `sidepulse` CLI and a folder standing in for the device. Covers both modes, the handover between them, ordering, exit, and event traces recorded from real OpenCode releases. | Nothing |
+| `SIDEPULSE_BIN=… node test/service.mjs` | A real SidePulse install. Starts its service and reads back what it shows. Add `--legacy` for a SidePulse from before `sidepulse report`. | SidePulse |
+| `OPENCODE_BIN=… node test/opencode.mjs` | A real OpenCode. Runs real turns on one of OpenCode's free models, which need no account. | OpenCode, network |
+| `npm run test:mutation` | [Stryker](https://stryker-mutator.io) changes the plugin one piece at a time and reruns the first layer. It fails below 85% caught. | Network, about ten minutes |
+
+The first three also run under `bun`. `test/run.mjs` takes a word to run only the tests
+whose name contains it, and `--keep` to keep the files of a failed test.
+
+CI runs all four. `compat.yml` pins the versions it checks:
+
+| Program | Versions |
+| --- | --- |
+| SidePulse | The commit before `sidepulse report`, the first commit with it, a later one, and `main` |
+| OpenCode 1 | 1.18.0 and 1.19.5 |
+| OpenCode 2 | 2.1.2, 2.3.0 and the latest release |
+
+The moving entries, SidePulse `main` and the latest OpenCode, also run every Monday. A
+breaking change in either program then fails here first. OpenCode releases older than
+1.18.0 cannot use the free models, so CI cannot run a turn in them.
+
+When a new OpenCode or SidePulse release changes behaviour, record what it sends, add it
+to `test/run.mjs` as a trace, and add the version to `compat.yml`.
+
+Two environment variables exist for the tests. `SIDEPULSE_VOLUMES` replaces `/Volumes` as
+the folder searched for the device. `SIDEPULSE_REPORT_TIMEOUT_MS` replaces the five
+seconds the plugin waits for the CLI.
 
 Without a clone, check that the published package imports:
 
@@ -156,7 +187,7 @@ bunx --package opencode-sidepulse bun -e \
 # default opencode-sidepulse
 ```
 
-That confirms the package only. Use a clone for the self-check and the demo.
+That confirms the package only. Use a clone for everything else.
 
 The LED language has no error channel. A program that fails to parse blinks all LEDs red
 six times. Watch the device during `--demo` to confirm each state.

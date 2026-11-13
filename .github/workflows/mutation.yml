@@ -1,0 +1,37 @@
+name: mutation
+
+# Mutation testing: Stryker changes the plugin one small piece at a time and reruns the
+# tests. A change no test notices is a gap in the tests. The run fails when fewer than 85%
+# of the changes are caught (see stryker.config.json).
+#
+# It takes about ten minutes, so it only runs when the plugin or its tests change.
+
+on:
+  pull_request:
+    paths:
+      - plugin.mjs
+      - test/**
+      - stryker.config.json
+      - .github/workflows/mutation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stryker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      # The package has no dependencies, so Stryker is fetched for this job only.
+      - run: npm run test:mutation
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: reports/mutation
+          if-no-files-found: ignore
