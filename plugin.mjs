@@ -40,10 +40,13 @@ const PROGRAMS = {
 // rules out "SidePulseDot".
 const VOLUME = /^(sidepulse|pulsedot)/i
 
+// macOS mounts the device under /Volumes. The override lets the tests use a plain folder.
+const VOLUMES = process.env.SIDEPULSE_VOLUMES || "/Volumes"
+
 function mount() {
   try {
-    for (const name of readdirSync("/Volumes")) {
-      const dir = join("/Volumes", name)
+    for (const name of readdirSync(VOLUMES)) {
+      const dir = join(VOLUMES, name)
       if (VOLUME.test(name) && existsSync(join(dir, "LEDS.LED"))) return dir
     }
   } catch {}
@@ -91,7 +94,7 @@ function command() {
 const ARGS = ["report", "--json"]
 const STDIO = ["pipe", "ignore", "ignore"]
 // The CLI gives the service half a second. The rest is Python startup.
-const REPORT_TIMEOUT_MS = 5000
+const REPORT_TIMEOUT_MS = Number(process.env.SIDEPULSE_REPORT_TIMEOUT_MS) || 5000
 
 // Resolves true only when the service accepted the report. A missing CLI, a stopped
 // service and a hung process all resolve false, so the caller falls back to direct mode
@@ -106,8 +109,8 @@ function run(body) {
       resolve(ok)
     }
     try {
-      // Detached and unref'd, so a report already on its way survives opencode exiting
-      // and never holds the process open.
+      // Detached and unref'd, so a report never holds the process open and is not taken
+      // down with opencode's process group.
       child = spawn(command(), ARGS, { detached: true, stdio: STDIO, windowsHide: true })
       child.once("error", () => finish(false))
       child.once("exit", (code) => finish(code === 0))
@@ -171,23 +174,21 @@ function settle(job, ok) {
   write(job.state)
 }
 
-// `opencode run` exits as soon as the turn ends, with the final report still queued. Send
-// what is left synchronously. The report in flight goes first so the queue cannot overtake
-// it. It keeps its request_id, and the service applies a repeated request_id only once,
-// so the detached copy changes nothing when it lands.
+// `opencode run` exits as soon as the turn ends, with the final report still queued or in
+// flight. Send what is left synchronously. The report in flight goes first so the queue
+// cannot overtake it. It is sent again even when nothing is queued behind it: its process
+// is detached, but its body may not have left this process yet, and Bun drops a body that
+// was written in the same tick as the exit. It keeps its request_id, and the service
+// applies a repeated request_id only once, so a second copy changes nothing.
 //
 // A session still working or waiting at exit can never finish, and the service never
 // expires those states on its own: the device would stay lit for a prompt nobody can
 // answer. Clear those sessions. Done and error stay, because they are still news.
 process.once("exit", () => {
-  if (appAlive || inflight)
-    for (const [sessionID, key] of reported)
-      if (key.startsWith("working") || key.startsWith("blocked"))
-        pending.push({ sessionID, key: "clear", body: reportBody(sessionID, { state: "clear" }) })
-  const queued = pending.splice(0)
-  // Nothing queued: the report in flight is detached and finishes on its own.
-  if (!queued.length) return
-  const jobs = inflight ? [inflight, ...queued] : queued
+  for (const [sessionID, key] of reported)
+    if (key.startsWith("working") || key.startsWith("blocked"))
+      pending.push({ sessionID, body: reportBody(sessionID, { state: "clear" }) })
+  const jobs = [...(inflight ? [inflight] : []), ...pending.splice(0)]
   inflight = undefined
   for (const job of jobs) {
     // No service, so nothing to clear. Do not start a process per session to find out.
@@ -316,6 +317,10 @@ function statusFor(signal, sessionID, tool) {
   return { state: status, ...(msg ? { msg } : {}) }
 }
 
+// Sessions whose turn ended in an error. OpenCode 1 follows session.error with
+// session.idle, and that idle would paint a failed turn green. Measured on 1.19.5.
+const failed = new Set()
+
 // The last status handed to the queue for each session. An unchanged status is skipped.
 // ponytail: never pruned. It holds one short string per session for the process lifetime.
 const reported = new Map()
@@ -324,6 +329,9 @@ const reported = new Map()
 // returns. A status light must not be able to break a turn or slow it down.
 function report(signal, sessionID, cwd, tool) {
   try {
+    if (signal === "error") failed.add(sessionID)
+    else if (signal !== "idle") failed.delete(sessionID)
+    else if (failed.has(sessionID)) return
     const state = stateFor(signal)
     const status = statusFor(signal, sessionID, tool)
     const key = `${status.state}:${status.kind ?? ""}`
@@ -342,16 +350,18 @@ function report(signal, sessionID, cwd, tool) {
 
 // The MacBook SD reader cuts power to the device after three minutes of inactivity.
 // The service does its own keepalive, so only do it when the service is absent.
+function beat() {
+  if (appAlive) return
+  const dir = mount()
+  if (!dir) return
+  try {
+    const now = new Date()
+    utimesSync(join(dir, "keepalive"), now, now)
+  } catch {}
+}
+
 function keepalive() {
-  const alive = setInterval(() => {
-    if (appAlive) return
-    const dir = mount()
-    if (!dir) return
-    try {
-      const now = new Date()
-      utimesSync(join(dir, "keepalive"), now, now)
-    } catch {}
-  }, 60_000)
+  const alive = setInterval(beat, 60_000)
   // Do not hold the process open on exit.
   alive.unref?.()
   return () => clearInterval(alive)
@@ -413,6 +423,7 @@ const plugin = {
 
 export default plugin
 
+// Stryker disable all: everything below is test code, not plugin code.
 // Self-check. Run it with: node plugin.mjs   (also works under bun)
 //   --demo   walk every LED state on the device, four seconds each
 //   --send   send one test report through the sidepulse CLI and print the result
