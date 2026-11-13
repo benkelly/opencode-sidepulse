@@ -81,33 +81,40 @@ plugin needs no timer to keep the color.
 
 ## Two modes
 
-The SidePulse menu-bar app also writes the LED control file. Two writers on one file
+The SidePulse background service also writes the LED control file. Two writers on one file
 conflict, and the device restarts its animation on every write. This plugin avoids the
-conflict. It picks a mode for each event:
+conflict. It picks a mode for each status change:
 
 | Mode | Condition | Behavior |
 | --- | --- | --- |
-| App | The app event socket answers. | Send a hook event. Never touch `LEDS.LED`. |
-| Direct | No socket answers. | Write an LED program to `LEDS.LED`. |
+| App | `sidepulse report` succeeds. | Report the session status. Never touch `LEDS.LED`. |
+| Direct | The command is missing or fails. | Write an LED program to `LEDS.LED`. |
 
 Only one process ever writes the device.
 
-In app mode the app owns the display. The app aggregates opencode together with Codex,
+In app mode the service owns the display. It aggregates opencode together with Codex,
 Claude, and Grok, and it shows the most actionable state across all of them. The plugin
-sends these upstream event names:
+pipes one [program status](https://github.com/inteliwear/sidepulse/blob/main/docs/protocol/program-status.md)
+report to `sidepulse report --json` whenever a session changes state:
 
-| Plugin signal | `hook_event_name` | App mode |
+| Plugin signal | Reported state | Shown as |
 | --- | --- | --- |
-| Turn start | `UserPromptSubmit` | Working |
-| Tool start | `PreToolUse` | Tool Running |
-| Tool end | `PostToolUse` | Working |
-| Permission prompt | `PermissionRequest` | Waiting For Input |
-| Failure | `PostToolUseFailure` | Blocked / Error |
-| Finished | `Stop` | Completed |
-| Aborted | `SessionEnd` | Completed |
+| Turn start, tool start, tool end | `working` | Working |
+| Permission prompt | `blocked`, kind `permission` | Waiting for Input |
+| Multiple-choice question | `blocked`, kind `question` | Waiting for Input |
+| Prompt answered | `working` | Working |
+| Failure, provider retry | `error` | Blocked / Error |
+| Finished, cancelled | `done` | Completed |
 
-The app needs no patch. Its ingest path accepts any provider name, so `opencode` appears
-as a normal agent. `HOOK_PROVIDERS` in the upstream package only limits CLI arguments.
+A report carries the session ID, the project directory and the state. It never carries
+prompts, tool input or tool output.
+
+The plugin reports a session only when its state changes, so a run of tool calls costs
+nothing. Reports go out one at a time, in order. Any report still queued when opencode
+exits is sent before the process ends, so `opencode run` still finishes green.
+
+The plugin looks for the command in `$SIDEPULSE_BIN`, then `~/.local/bin/sidepulse`, then
+`PATH`. The service needs no patch: `opencode` appears as a normal agent.
 
 Direct mode needs no Python and no app. The device exposes its controller as a file, so a
 file write is the whole interface.
@@ -118,6 +125,9 @@ file write is the whole interface.
 - OpenCode 2, or OpenCode 1.17.20 or newer. Older OpenCode 1 releases are not tested. If
   the plugin does not load on one of them, use `opencode-sidepulse@0.1.7`.
 - A SidePulse Pro or SidePulse Dot.
+- For app mode, a SidePulse release that has the `sidepulse report` command. Upstream
+  added it on 10 November 2026. An older menu-bar app does not understand this plugin and
+  both would write the device, so update SidePulse or use `opencode-sidepulse@0.2.0`.
 
 The plugin needs no dependencies and no build step. It uses only Node standard library
 modules, so it runs the same under any opencode runtime.
@@ -127,13 +137,14 @@ modules, so it runs the same under any opencode runtime.
 From a clone of this repository, under `node` or `bun`:
 
 ```sh
-node plugin.mjs          # program limits, state machine, device and socket discovery
-node plugin.mjs --send   # send one test event to a running app, and report delivery
+node plugin.mjs          # program limits, state machine, device and CLI discovery
+node plugin.mjs --send   # send one test report through the sidepulse CLI
 node plugin.mjs --demo   # walk every LED state on the real device, four seconds each
 ```
 
-Use `--send` whenever you change the socket transport. App mode falls back to direct mode
-on any failure, so a broken transport is otherwise invisible.
+Use `--send` whenever you change the transport. App mode falls back to direct mode on any
+failure, so a broken transport is otherwise invisible. The test report clears a session
+that does not exist, so it leaves nothing in the menu.
 
 Without a clone, check that the published package imports:
 
@@ -150,18 +161,20 @@ six times. Watch the device during `--demo` to confirm each state.
 
 ## Known limits
 
-- Direct mode tracks one state for all sessions. Run the menu-bar app if you need true
-  per-session aggregation.
+- Direct mode tracks one state for all sessions. Run the SidePulse service if you need
+  true per-session aggregation.
+- App mode does not name the running tool. The service draws a running tool the same way
+  as Working.
 - In direct mode the plugin touches `keepalive` once a minute. The MacBook SD card reader
   cuts power to the device after three minutes of inactivity. The device therefore goes
-  dark a few minutes after you quit opencode. In app mode the app owns the keepalive.
+  dark a few minutes after you quit opencode. In app mode the service owns the keepalive.
 - The device ignores LED indexes above its LED count. The programs target LEDs 0 to 3, so
   they work on the eight-LED Pro and degrade on the two-LED Dot.
 
 ## Credits
 
 SidePulse and its LED language come from [inteliwear/sidepulse](https://github.com/inteliwear/sidepulse) (MIT).
-This plugin is an independent client of the documented file and socket interfaces.
+This plugin is an independent client of the documented file and status report interfaces.
 
 ## License
 
