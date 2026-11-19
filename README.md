@@ -79,6 +79,34 @@ tell you things you cannot see. You already know that you cancelled it.
 The green hold stays until the next turn starts. The device holds the last program, so the
 plugin needs no timer to keep the color. A failed turn stays red the same way.
 
+## Brightness
+
+In direct mode, the plugin writes each LED program at full brightness. Direct mode is the
+mode without the SidePulse service (see [Two modes](#two-modes)). To dim the LEDs,
+set the `brightness` option to an integer from 0 (off) to 255 (full).
+
+On OpenCode 2, use the object form of the plugin entry in `opencode.json(c)`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [{ "package": "opencode-sidepulse", "options": { "brightness": 40 } }]
+}
+```
+
+On OpenCode 1, use a tuple in `plugin`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [["opencode-sidepulse", { "brightness": 40 }]]
+}
+```
+
+The plugin ignores a value that is not an integer from 0 to 255, and uses full
+brightness. In app mode, the plugin ignores this option. The SidePulse service applies
+the brightness from its own settings.
+
 ## Two modes
 
 The SidePulse background service also writes the LED control file. Two writers on one file

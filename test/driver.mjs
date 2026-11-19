@@ -59,7 +59,7 @@ let unload
 
 // OpenCode 1 hands hooks back from server() and carries event payloads in `properties`.
 async function v1() {
-  const h = await plugin.server({ directory })
+  const h = await plugin.server({ directory }, scenario.options)
   hooks = {
     prompt: (sessionID) => h["chat.message"]({ sessionID }),
     before: (sessionID, tool) => h["tool.execute.before"]({ tool, sessionID }),
@@ -76,6 +76,7 @@ async function v2() {
   let wake
   let ended = false
   const ctx = {
+    options: scenario.options ?? {},
     location: { directory },
     session: { hook: async (name, fn) => void (registered[`session.${name}`] = fn) },
     tool: { hook: async (name, fn) => void (registered[`tool.${name}`] = fn) },

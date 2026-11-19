@@ -53,6 +53,25 @@ function mount() {
   return undefined
 }
 
+// Direct mode only. In app mode the service applies its own brightness setting.
+let brightness
+
+// The controller scales RGB by `brightness N`, 0 to 255. Anything else keeps full brightness.
+function parseBrightness(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 255 ? value : undefined
+}
+
+function configure(options) {
+  const next = parseBrightness(options?.brightness)
+  if (next === brightness) return
+  brightness = next
+  shown = undefined
+}
+
+function program(state) {
+  return brightness === undefined ? PROGRAMS[state] : `brightness ${brightness}\n${PROGRAMS[state]}`
+}
+
 let shown
 
 function write(state) {
@@ -63,7 +82,7 @@ function write(state) {
     return false
   }
   try {
-    writeFileSync(join(dir, "LEDS.LED"), PROGRAMS[state])
+    writeFileSync(join(dir, "LEDS.LED"), program(state))
     shown = state
     return true
   } catch {
@@ -387,7 +406,8 @@ function onEvent(event, cwd) {
 const plugin = {
   id: "opencode-sidepulse",
 
-  async server({ directory } = {}) {
+  async server({ directory } = {}, options) {
+    configure(options)
     const cwd = directory ?? process.cwd()
     const stop = keepalive()
     return {
@@ -400,6 +420,7 @@ const plugin = {
   },
 
   async setup(ctx) {
+    configure(ctx.options)
     const cwd = ctx.location?.directory ?? process.cwd()
     const stop = keepalive()
     const controller = new AbortController()
@@ -432,10 +453,17 @@ export default plugin
 const selfCheck =
   import.meta.main || process.argv[1]?.endsWith("plugin.mjs")
 if (selfCheck) {
-  for (const [name, program] of Object.entries(PROGRAMS)) {
+  for (const [name, plain] of Object.entries(PROGRAMS)) {
+    const program = `brightness 255\n${plain}`
     const bytes = Buffer.byteLength(program)
     const lines = program.trimEnd().split("\n").length
     if (bytes > 512 || lines > 20) throw new Error(`${name} exceeds the controller: ${bytes} bytes, ${lines} lines`)
+  }
+
+  const levels = [[0, 0], [255, 255], [64, 64], [-1], [256], [1.5], ["64"], [null], [undefined]]
+  for (const [input, want] of levels) {
+    const got = parseBrightness(input)
+    if (got !== want) throw new Error(`brightness ${JSON.stringify(input)}: got ${got}, want ${want}`)
   }
 
   const signals = ["start", "tool-start", "ask", "tool-end", "reply", "idle", "error"]

@@ -58,6 +58,7 @@ const times = (n, steps) => Array.from({ length: n }, () => steps).flat()
 //   cli        where the CLI is found: "env" (default), "home", "path"
 //   decoy      put a wrong CLI at "home" or "path". It must never run.
 //   hang       the CLI never answers
+//   options    plugin options from opencode.json
 //   env        extra environment for the plugin
 //   check      a function given { bodies, result } for anything else
 const tests = []
@@ -505,6 +506,28 @@ test("direct mode: an unchanged state is not written again", {
   led: "someone else\n",
 })
 
+for (const opencode of [1, 2])
+  test(`direct mode: the brightness option dims every program (OpenCode ${opencode})`, {
+    opencode,
+    service: "none",
+    options: { brightness: 40 },
+    steps: [["prompt", A], ["led"], asked(A), ["led"]],
+    leds: [`brightness 40\n${LED.busy}`, `brightness 40\n${LED.waiting}`],
+    led: `brightness 40\n${LED.waiting}`,
+  })
+
+test("direct mode: an invalid brightness keeps full brightness", {
+  service: "none",
+  options: { brightness: "dim" },
+  steps: [["prompt", A]],
+  led: "busy",
+})
+
+test("app mode: the brightness option leaves the device to the service", {
+  options: { brightness: 40 },
+  steps: [["prompt", A]],
+})
+
 test("direct mode: no device is not an error", {
   service: "none",
   volume: null,
@@ -723,7 +746,7 @@ async function run(t) {
   if (t.decoy === "home") script(join(home, ".local", "bin"), "sidepulse", decoy)
   if (t.decoy === "path") script(bin, "sidepulse", decoy)
   env.PATH = `${bin}${delimiter}${process.env.PATH}`
-  env.SCENARIO = JSON.stringify({ opencode: t.opencode ?? 1, steps: t.steps })
+  env.SCENARIO = JSON.stringify({ opencode: t.opencode ?? 1, options: t.options, steps: t.steps })
   env.SCENARIO_DIR = dir
   env.SCENARIO_LED = led
 
