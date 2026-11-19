@@ -23,6 +23,7 @@ const DRIVER = join(here, "driver.mjs")
 // twice, once in the plugin and once here.
 const LED = {
   busy: "off\n0:#00ccff 1:#0088cc 2:#004466 3:#001a26\nroll 1.2s linear\nrepeat\n",
+  dotBusy: "off\n0:#00ccff 760ms pulse 0ms; 1:#00ccff 760ms pulse 260ms\nrepeat\n",
   waiting: "off\n#ffb000 1.4s pulse\nrepeat\n",
   error: "off\n#ff2000 0.9s pulse\nrepeat\n",
   done: "#00ff22 0.6s cosine\n",
@@ -545,13 +546,22 @@ test("direct mode: a device that appears later is painted on the next event", {
   led: "busy",
 })
 
-for (const volume of ["SidePulsePro", "PulseDot", "sidepulse lower"])
+for (const [volume, busy] of [["SidePulsePro", "busy"], ["PulseDot", "dotBusy"], ["sidepulse lower", "busy"]])
   test(`direct mode: the volume ${volume} is a device`, {
     service: "none",
     volume,
     steps: [["prompt", A]],
-    led: "busy",
+    led: busy,
   })
+
+test("direct mode: the Dot gets its own busy program, and the shared ones otherwise", {
+  service: "none",
+  volume: "PulseDot",
+  options: { brightness: 40 },
+  steps: [["prompt", A], ["led"], asked(A), ["led"]],
+  leds: [`brightness 40\n${LED.dotBusy}`, `brightness 40\n${LED.waiting}`],
+  led: `brightness 40\n${LED.waiting}`,
+})
 
 for (const volume of ["Macintosh HD", "My SidePulse"])
   test(`direct mode: the volume ${volume} is not a device`, {

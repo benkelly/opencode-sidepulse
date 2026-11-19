@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { existsSync, readdirSync, utimesSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
 // Two ways to drive a SidePulse device, picked per event:
 //
@@ -33,6 +33,12 @@ const PROGRAMS = {
   // Solid green, held until the next turn starts. A program without `repeat` holds its
   // final state, so no timer is needed to decay this.
   done: "#00ff22 0.6s cosine\n",
+}
+
+// The Dot has two LEDs, so the comet above shows only a slice of itself and flickers.
+// This pulses both LEDs with an offset, like upstream's cyan-roll-2.LED.
+const DOT_PROGRAMS = {
+  busy: "off\n0:#00ccff 760ms pulse 0ms; 1:#00ccff 760ms pulse 260ms\nrepeat\n",
 }
 
 // Volume names differ by model (SidePulse, SidePulsePro, PulseDot), so match the prefix
@@ -68,8 +74,10 @@ function configure(options) {
   shown = undefined
 }
 
-function program(state) {
-  return brightness === undefined ? PROGRAMS[state] : `brightness ${brightness}\n${PROGRAMS[state]}`
+function program(state, dir) {
+  const dot = /^pulsedot/i.test(basename(dir))
+  const base = (dot && DOT_PROGRAMS[state]) || PROGRAMS[state]
+  return brightness === undefined ? base : `brightness ${brightness}\n${base}`
 }
 
 let shown
@@ -82,7 +90,7 @@ function write(state) {
     return false
   }
   try {
-    writeFileSync(join(dir, "LEDS.LED"), program(state))
+    writeFileSync(join(dir, "LEDS.LED"), program(state, dir))
     shown = state
     return true
   } catch {
@@ -453,7 +461,8 @@ export default plugin
 const selfCheck =
   import.meta.main || process.argv[1]?.endsWith("plugin.mjs")
 if (selfCheck) {
-  for (const [name, plain] of Object.entries(PROGRAMS)) {
+  const all = [...Object.entries(PROGRAMS), ...Object.entries(DOT_PROGRAMS).map(([k, v]) => [`dot ${k}`, v])]
+  for (const [name, plain] of all) {
     const program = `brightness 255\n${plain}`
     const bytes = Buffer.byteLength(program)
     const lines = program.trimEnd().split("\n").length

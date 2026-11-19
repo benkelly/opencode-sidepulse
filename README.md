@@ -72,6 +72,9 @@ second instance and the two fight over the device.
 | Solid green | The turn finished, or you cancelled it. |
 | Red breathing | The turn failed, or opencode is retrying a failed provider call. |
 
+The Dot has two LEDs, which are too few for the comet. On the Dot, the two LEDs pulse cyan
+one after the other. The other states look the same on both devices.
+
 A cancelled turn deliberately looks the same as a finished one. The device is there to
 tell you things you cannot see. You already know that you cancelled it.
 
